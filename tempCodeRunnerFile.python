@@ -1,0 +1,346 @@
+
+
+
+from flask import Flask, request, jsonify, session
+from Database.super_admin_db import get_customer_by_email, insert_tempuser, insert_customer, delete_temp_user, delete_otp, insert_otp, get__email_and_otp
+from Database.customer_db import insert_device_data
+from flask_session import Session
+
+from email_validator import validate_email, EmailNotValidError
+from flask_mail import Mail, Message
+from passlib.hash import sha256_crypt
+from flask_cors import CORS
+from flask_login import LoginManager, login_user, logout_user, login_required, UserMixin, current_user
+import random
+import os
+import logging
+
+app = Flask(__name__)
+
+# Enable CORS for all routes and allow credentials
+CORS(app, supports_credentials=True, origins=['http://localhost:3000'])
+
+# Secret key for sessions
+app.config['SECRET_KEY'] = 'your-secret-key'
+
+# Mail configuration
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USE_SSL'] = False
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME', 'default@example.com')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', 'defaultpassword')
+
+mail = Mail(app)
+
+# Initialize Flask-Login
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+# Logging configuration
+logging.basicConfig(level=logging.INFO)
+from datetime import timedelta
+
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=30)
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_PERMANENT'] = False
+
+# Initialize session
+Session(app)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Allow cookies with cross-origin requests
+app.config['SESSION_COOKIE_SECURE'] = False # Allows the cookie to be sent with cross-origin requests
+
+# User model for Flask-Login
+class User(UserMixin):
+    def _init_(self, id, email):
+        self.id = id
+        self.email = email
+
+@login_manager.user_loader
+def load_user(user_id):
+    customer = get_customer_by_email(user_id)
+    if customer:
+        return User(id=user_id, email=customer[2])  # Assuming customer[2] is the email
+    return None
+
+# Function to create necessary tables
+def create_tables():
+    from Database.super_admin_db import create_customer_table, create_tempuser_and_otp_tables
+    create_customer_table()
+    create_tempuser_and_otp_tables()
+
+# Initialize tables on app startup
+with app.app_context():
+    create_tables()
+
+
+logging.basicConfig(level=logging.INFO)
+def user():
+    """ Function to get the session user """
+    if "user" in session:
+        logging.info(f"Session user: {session['user']}")
+        return session["user"]
+    else:
+        logging.warning("No user in session")
+        return None
+
+
+ # Login function
+@app.route('/login', methods=['POST'])
+def login():
+
+    try:
+        data = request.json
+        email = data.get('email')
+        password = data.get('password')
+
+        logging.info("Login API called")
+
+        # Validate input fields
+        if not all([email, password]):
+            return jsonify({"error": "Email and Password are required"}), 400
+
+        # Fetch customer by email (Replace this with your actual database logic)
+        customer = get_customer_by_email(email)
+
+        # Check if customer exists
+        if customer is None:
+            return jsonify({"error": "Invalid email or password"}), 400
+
+        # Check password hash
+        if sha256_crypt.verify(password, customer[4]):  # Assuming customer[4] holds the password hash
+            session["user"] = email
+            logging.info(f"Session set with user email: {session['user']}")
+
+            # After successful login, you may call other functions to set up the database or create necessary tables
+            database_name = email.split('@')[0]
+            logging.info(f"Logged-in user database: {database_name}")
+
+            # Assuming you have some database table creation logic here
+            from Database.customer_db import create_Cameras_info_table, create_device_info_table
+            create_Cameras_info_table(database_name)
+            create_device_info_table(database_name)
+
+           
+                
+
+            return jsonify({"message": "Login successful"}), 200
+
+        return jsonify({"error": "Invalid email or password"}), 400
+    except Exception as e:
+        logging.error(f"Error during login: {str(e)}")
+        return jsonify({"error": "Failed to login"}), 500
+        
+
+
+
+
+
+
+
+def show_devices(customer_db_name):
+    print("hoi")
+    from Database.customer_db import get_all_devices
+    rows = get_all_devices(customer_db_name)
+    print(rows)
+    
+
+
+
+
+
+from flask import Flask, request, jsonify, session
+from Database.customer_db import insert_camera_info  # Import the insert function
+
+@app.route('/api/camera-info', methods=['POST', 'OPTIONS'])
+def add_camera_info():
+    logging.info("From camera_info endpoint")
+    logging.info(f"Current session data: {session}")
+    print("camera")
+
+    try:
+        # Get user from session
+        email = user()
+        print(email)
+        if not email:
+            logging.warning("Session is empty or 'user' key not found")
+            return jsonify({"error": "Unauthorized access. Please log in."}), 401
+
+        logging.info(f"Session user email: {email}")
+
+        # Convert email into database name
+        database_name = email.split('@')[0]
+        logging.info(f"Logged-in user database: {database_name}")
+
+        # Extract and validate JSON data from the request
+        data = request.json
+        if not data:
+            return jsonify({"error": "Invalid request. No JSON payload provided."}), 400
+
+        # Extract fields from the request
+        customer_email = data.get('customer_email')
+        ip_address = data.get('ip_address')
+        mac_address = data.get('mac_address')
+        username = data.get('username')
+        password = data.get('password')
+        onvif_rtsp_settings = data.get('onvif_rtsp_settings')
+        port_number = data.get('port_number')
+        alert_mode = data.get('alertmode')
+        use_cases = data.get('use_cases')
+
+        # Validate required fields
+        if not all([customer_email, ip_address, mac_address, username, password, onvif_rtsp_settings, port_number, alert_mode, use_cases]):
+            return jsonify({"error": "All fields are required"}), 400
+
+        logging.info(f"Received data: {customer_email}, {ip_address}, {mac_address}, {username}, {onvif_rtsp_settings}, {port_number}, {alert_mode}, {use_cases}")
+
+        # Insert camera info into the database
+        try:
+            customer_db_name = customer_email.split('@')[0]
+            logging.info(f"Inserting camera data into {customer_db_name} database...")
+
+            # Assuming insert_camera_info is your function to insert data into the DB
+            from Database.customer_db import insert_camera_info
+            insert_camera_info(
+                customer_db_name,
+                ip_address,
+                mac_address,
+                username,
+                password,
+                onvif_rtsp_settings,
+                port_number,
+                alert_mode,
+                use_cases
+            )
+
+            logging.info("Camera info inserted successfully.")
+            return jsonify({"message": "Camera info inserted successfully"}), 201
+        except Exception as e:
+            logging.error(f"Error inserting camera info: {str(e)}")
+            return jsonify({"error": f"Failed to insert camera info", "details": str(e)}), 500
+
+    except Exception as e:
+        logging.error(f"An error occurred: {str(e)}")
+        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+
+
+
+
+
+    
+
+
+
+# API route to insert device data
+@app.route('/api/camera-info/update', methods=['POST'])
+def update_camera_info():
+
+    print("  Camera-info update ......????")
+
+    data = request.json
+    print(data)
+    customer_email = data.get('customer_email')
+   
+    if not customer_email:
+        return jsonify({"error": "Customer email is required"}), 400
+    customer_db_name = customer_email.split('@')[0]  
+    # customer_db_name = 'abhi45'
+    print("hi",customer_db_name)
+
+    cam_id = data['camera_id']
+    
+    ip_address = data['ip_address']
+    mac_address= data['mac_address']
+    username =  data['username']
+    password = data['password']
+    onvif_rtsp_settings =data['onvif_rtsp_settings']
+    port_number = data['port_number']
+    alert_mode = data['alertmode']
+    use_cases = data['use_cases']
+    print(customer_db_name, cam_id,ip_address, mac_address, username, password, onvif_rtsp_settings, port_number, alert_mode, use_cases)
+    if not [customer_db_name,cam_id,ip_address, mac_address, username, password, onvif_rtsp_settings, port_number, alert_mode, use_cases]:
+        return jsonify({"error": "All field required is required"}), 400
+
+    from Database.customer_db import update_camera_info
+    try:
+        update_camera_info(customer_db_name,cam_id, ip_address, mac_address, username, password, onvif_rtsp_settings, port_number, alert_mode, use_cases)
+        return jsonify({"message": "Camera info updated   successfully"}), 201
+    except Exception as e:
+        print(f"Error inserting device data: {e}")
+        return jsonify({"error": "Failed update camera-info"}), 500
+
+
+
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    session.pop('username', None)
+    return jsonify({'message': 'Logged out successfully'}), 200
+
+
+
+
+# Add CORS headers to all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')  # Replace '*' with specific origin if needed
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=8080)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
